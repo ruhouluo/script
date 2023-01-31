@@ -28,6 +28,14 @@ type SendgridEmailTemplatesType = {
   update_date: Date;
 };
 
+type FunctionEmailTemplatesType = {
+  func_id: string;
+  template_id: string;
+  status: number;
+};
+
+type RecordFunctionEmailTemplatesType = FunctionEmailTemplatesType & { success: boolean };
+
 
 
 const getActiveEmailTemplates = async (connection: Connection ): Promise<SendgridEmailTemplatesType[]> => {
@@ -61,7 +69,27 @@ const writeFunctionEmails = async (connection: Connection, data: FunctionEmailsT
   });
 }
 
-const writerRecordsToCsv = async (records: RecordFunctionEmailsType[], writer: any) => {
+const writeFunctionEmailWithTemplates = async (connection: Connection, data: FunctionEmailTemplatesType[]) => {
+  if (!data.length) {
+    return;
+  }
+
+  const insertArr = data.map(({ func_id, template_id, status}) => {
+    return `("${func_id}","${template_id}",${status})`;
+  });
+
+  return new Promise((resolve, reject) => {
+    connection.query('INSERT INTO FUNCTION_EMAIL_TEMPLATES (`func_id`, `template_id`, `status`) VALUES ' + `${insertArr.join(",")}`,
+      (err: QueryError, results: RowDataPacket[]) => {
+        if (err) {
+          reject(err);
+        }
+        resolve(results);
+      })
+  });
+}
+
+const writerRecordsToCsv = async (records: (RecordFunctionEmailsType | RecordFunctionEmailTemplatesType)[], writer: any) => {
   return writer.writeRecords(records);
 }
 
@@ -78,32 +106,63 @@ const getWriter = async () => {
   return csvWriter.getObjectToCsvHandler({ path, header });
 };
 
+const getFunctionWithTemplatesWriter = async () => {
+  const path = "./exports/functions_templates_relation.csv";
+  const header: { id: string; title: string }[] = [
+    { id: "func_id", title: "Func Id" },
+    { id: "template_id", title: "Template Id" },
+    { id: "status", title: "Status" },
+    { id: "success", title: "Success" }
+  ];
+  return csvWriter.getObjectToCsvHandler({ path, header });
+};
+
 const main = async () => {
-  const templates = await getActiveEmailTemplates(mysql_cli);
-  const length = templates.length;
-  console.log('active templates length = ', length);
-
-  const writer = await getWriter();
-
-  const functions: FunctionEmailsType[] = templates.map(({ template_id, name}) => ({ uuid: template_id, name: name, recipients: '', trigger: '', status: 1 }));
-
-  const size = 10;
-
   const records: RecordFunctionEmailsType[] = [];
-  for (let i = 0; i < Math.ceil(length / size); i++) {
-    const chunk = functions.slice(i * size, (i + 1) * size);
-    try {
-      await writeFunctionEmails(mysql_cli, chunk);
-      records.push(...chunk.map((i) => ({ ...i, success: true })));
-    } catch (e) {
-      console.log('---e', e);
-      records.push(...chunk.map((i) => ({ ...i, success: false })))
+  const recordsFunctionWithTemplates: RecordFunctionEmailTemplatesType[] = [];
+  const writer = await getWriter();
+  const functionWithTemplatesWriter = await getFunctionWithTemplatesWriter();
+
+  try {
+    const templates = await getActiveEmailTemplates(mysql_cli);
+    const length = templates.length;
+    console.log('active templates length = ', length);
+
+    const functions: FunctionEmailsType[] = templates.map(({ template_id, name}) => ({ uuid: template_id, name: name, recipients: '', trigger: '', status: 1 }));
+
+    const size = 50;
+
+
+    for (let i = 0; i < Math.ceil(length / size); i++) {
+      const chunk = functions.slice(i * size, (i + 1) * size);
+      try {
+        await writeFunctionEmails(mysql_cli, chunk);
+        records.push(...chunk.map((i) => ({ ...i, success: true })));
+      } catch (e) {
+        console.log('---e', e);
+        records.push(...chunk.map((i) => ({ ...i, success: false })))
+      }
     }
+
+    const functionWithTemplates = templates.map(({ template_id }) => ({ func_id: template_id, template_id, status: 1 }));
+
+    for (let i = 0; i < Math.ceil(length / size); i++) {
+      const chunk = functionWithTemplates.slice(i * size, (i + 1) * size);
+      try {
+        await writeFunctionEmailWithTemplates(mysql_cli, chunk);
+        recordsFunctionWithTemplates.push(...chunk.map((i) => ({ ...i, success: true })));
+      } catch (e) {
+        console.log('---e', e);
+        recordsFunctionWithTemplates.push(...chunk.map((i) => ({ ...i, success: false })))
+      }
+    }
+  } finally {
+    mysql_cli.destroy();
   }
 
-  mysql_cli.destroy();
 
   await writerRecordsToCsv(records, writer);
+  await writerRecordsToCsv(recordsFunctionWithTemplates, functionWithTemplatesWriter);
 }
 
 main();
